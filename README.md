@@ -23,9 +23,9 @@ This guide explains how to package **InventoryDashboard.py** into an executable 
   ```
 - Build the executable:
   ```bash
-  pyinstaller InventoryDashboard.spec
+  pyinstaller InventoryDashboard_cgp.spec
   or
-  pyinstaller -clean InventoryDashboard.spec
+  pyinstaller --clean InventoryDashboard_cgp.spec
   ```
 
 ---
