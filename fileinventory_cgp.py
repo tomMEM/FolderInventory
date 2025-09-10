@@ -211,16 +211,16 @@ def check_docx_for_topics(filepath, topic_definitions):
 
 
 def _ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensure all FIELDNAMES exist in the dataframe with correct dtypes.
-    """
     df = df.copy()
     for col_name in FIELDNAMES:
         if col_name not in df.columns:
             df[col_name] = '' if col_name == 'Manual_Notes' else pd.NA
     if 'Manual_Notes' in df.columns:
         df['Manual_Notes'] = df['Manual_Notes'].fillna('').astype(str)
+    if 'Size (Bytes)' in df.columns:
+        df['Size (Bytes)'] = pd.to_numeric(df['Size (Bytes)'], errors='coerce').astype('Int64')
     return df
+
 
 
 def load_existing_inventory(xlsx_filepath):
@@ -394,8 +394,7 @@ def process_folder_inventory(start_folder_path, xlsx_output_path, topic_keywords
     file_count, updates_count, adds_count, removed_count = 0, 0, 0, 0
 
     for root, dirs, files in os.walk(start_folder_path, topdown=True):
-        # Skip some technical dirs
-        dirs[:] = [d for d in dirs if d not in ['.git', '__pycache__', '.ipynb_checkpoints', '.DS_Store']]
+        files = [f for f in files if f.lower() != INVENTORY_FILENAME.lower()]
 
         # Avoid listing the output inventory file itself
         if os.path.abspath(root) == os.path.dirname(os.path.abspath(xlsx_output_path)):
@@ -625,8 +624,9 @@ def attempt_inventory_recovery(xlsx_filepath):
                         except:
                             pass
 
+            
             # Then try backup
-            if os.path.exists(backup_path) and os.pathsize(backup_path) > 0:
+            if os.path.exists(backup_path) and os.path.getsize(backup_path) > 0:
                 try:
                     backup_df = pd.read_excel(backup_path, engine='openpyxl')
                     if not backup_df.empty:
@@ -635,6 +635,7 @@ def attempt_inventory_recovery(xlsx_filepath):
                         return True
                 except:
                     pass
+
         return False
     except Exception as e:
         print(f"Recovery attempt failed: {e}")
@@ -684,18 +685,33 @@ def run_scan_and_display(folder_path_input):
 
 
 def _text_search_mask(series: pd.Series, terms):
-    """
-    Returns a boolean mask where each row matches ALL terms (AND),
-    case-insensitive, NaN-safe.
-    """
     mask = pd.Series(True, index=series.index)
     s = series.astype(str).str.lower().fillna('')
+
+    def _is_pathy(t: str) -> bool:
+        return any(ch in t for ch in ['\\', '/', ':'])
+
     for term in terms:
         t = term.strip().lower()
         if not t:
             continue
-        mask &= s.str.contains(t, na=False)
+        use_regex = not _is_pathy(t)   # literal for path-like strings
+        mask &= s.str.contains(t, na=False, regex=use_regex)
+        #mask &= s.str.contains(t, na=False, regex=False)
+
     return mask
+
+
+def _persistent_dir():
+    try:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        path = os.path.join(base, "InventoryDashboard")
+        os.makedirs(path, exist_ok=True)
+        return path
+    except Exception:
+        return os.getcwd()
+
+RECENT_FOLDERS_FILE = os.path.join(_persistent_dir(), "recent_folders.txt")
 
 
 def filter_dataframe_display(df_full_from_state: pd.DataFrame, status_filter: str, topic_filter_text: str, filename_filter_text: str) -> pd.DataFrame:
@@ -744,24 +760,37 @@ def filter_dataframe_display(df_full_from_state: pd.DataFrame, status_filter: st
                     if term:
                         search_terms.append(term)
 
+            
             # Apply folder inclusions (OR logic - keep if matches any term)
             if folder_includes:
                 mask = pd.Series(False, index=df_filtered.index)
                 fp = df_filtered['Folder Path'].astype(str).str.lower()
                 for term in folder_includes:
-                    mask |= fp.str.contains(term, na=False)
+                    t = term.strip()
+                    if t:
+                        mask |= fp.str.contains(t, na=False, regex=False)  # literal
                 df_filtered = df_filtered[mask]
-
+            
             # Apply folder exclusions (OR logic - exclude if matches any term)
             if folder_excludes:
+                fp = df_filtered['Folder Path'].astype(str).str.lower()
                 for term in folder_excludes:
-                    df_filtered = df_filtered[
-                        ~df_filtered['Folder Path'].astype(str).str.lower().str.contains(term, na=False)
-                    ]
+                    t = term.strip()
+                    if t:
+                        df_filtered = df_filtered[~fp.str.contains(t, na=False, regex=False)]  # literal
 
+
+            
             # Cross-column search (AND across terms)
             if search_terms:
-                columns_to_search = ['File Name', 'Manual_Notes', 'Content Hint', 'Identified Topics (DOCX)', 'Full Path']
+                columns_to_search = [
+                    'File Name',
+                    'Manual_Notes',
+                    'Content Hint',
+                    'Identified Topics (DOCX)',
+                    'Full Path',
+                    'Last Modified'   # <-- add this
+                ]
                 # Build combined string
                 combined = pd.Series('', index=df_filtered.index)
                 for col in columns_to_search:
@@ -769,6 +798,7 @@ def filter_dataframe_display(df_full_from_state: pd.DataFrame, status_filter: st
                         combined = combined.str.cat(df_filtered[col].astype(str).fillna(''), sep=' || ')
                 mask_all = _text_search_mask(combined, search_terms)
                 df_filtered = df_filtered[mask_all]
+
 
         # Topic filter (unchanged; AND across terms)
         if topic_filter_text:
@@ -930,10 +960,13 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             new_choices, _ = load_recent_folders(initial_choice=str(folder_path_input))
             dropdown_update = gr.update(choices=new_choices, value=str(folder_path_input))
         else:
-            dropdown_update = gr.update()  # no change
+            dropdown_update = gr.update(value=str(folder_path_input) if folder_path_input else None)
+
 
         # Original behavior
-        d, s, x, f, xs = run_scan_and_display(str(folder_path_input) if folder_path_input else "")
+        
+        d, s, x, f, xs = run_scan_and_display(str(folder_path_input).strip() if folder_path_input else "")
+
         return d, s, x, f, xs, dropdown_update
 
     scan_button.click(
